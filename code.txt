@@ -1,0 +1,555 @@
+getwd()
+setwd("/mnt/data/home/tyu-9bw1lc6n/data")
+library(Seurat)
+Control.data <- Read10X(data.dir = "Control")
+Control.data<- CreateSeuratObject(counts =Control.data, project = "Control",min.cells = 3,min.features = 200)
+Model.data <- Read10X(data.dir = "Model")
+Model.data<- CreateSeuratObject(counts =Model.data, project = "Model",min.cells = 3,min.features = 200)
+BXD.data <- Read10X(data.dir = "BXD")
+BXD.data<- CreateSeuratObject(counts =BXD.data, project = "BXD",min.cells = 3,min.features = 200)
+XKD.data <- Read10X(data.dir = "XKD")
+XKD.data<- CreateSeuratObject(counts =XKD.data, project = "XKD",min.cells = 3,min.features = 200)
+#1.过滤线粒体
+data.combined <- merge(Control.data, y = c(Model.data,BXD.data,XKD.data), add.cell.ids = c("Control", "Model","BXD","XKD"), project = "ALL")
+data.combined[["percent.mt"]]<-PercentageFeatureSet(data.combined,pattern = "mt")
+VlnPlot(data.combined,features = c("nFeature_RNA","nCount_RNA","percent.mt"),ncol=3)
+plot1 <- FeatureScatter(data.combined, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(data.combined, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+data.combined <- subset(data.combined, subset = nFeature_RNA > 200 & nFeature_RNA < 5000& percent.mt < 1)
+#数据标准化
+hist(colSums(data.combined$RNA@data),breaks = 100,main = "Total expression before normalisation",xlab = "Sum of expression")
+data.combined <- NormalizeData(data.combined, normalization.method = "LogNormalize", scale.factor = 10000)
+hist(colSums(data.combined$RNA@data),breaks = 100, main = "Total expression after normalisation",xlab= "Sum of expression") 
+#3.变化基因鉴定,鉴定在细胞间表达高度变化的基因
+data.combined <- FindVariableFeatures(data.combined, selection.method = "vst", nfeatures = 2000)
+#数据缩放
+all.genes <- rownames(data.combined)
+data.combined <- ScaleData(data.combined, features = all.genes)
+#
+data.combined<- RunPCA(data.combined, features = VariableFeatures(object = data.combined))
+print(data.combined[["pca"]], dims = 1:5, nfeatures = 5)#可视化对每个主成分影响比较大的基因集
+VizDimLoadings(data.combined, dims = 1:2, reduction = "pca")
+DimPlot(data.combined, reduction = "pca",split.by = 'ident')#两个
+DimHeatmap(data.combined, dims = 1, cells = 500, balanced = TRUE)#DimHeatmap绘制基于单个主成分的热图，细胞和基因的排序都是基于他们的主成分分数
+DimHeatmap(data.combined, dims = 1:15, cells = 500, balanced = TRUE)#展示多个
+data.combined <- JackStraw(data.combined, num.replicate = 100)
+data.combined <- ScoreJackStraw(data.combined, dims = 1:20)
+JackStrawPlot(data.combined, dims = 1:20)
+ElbowPlot(object=data.combined,ndims=50)
+data.combined<- FindNeighbors(data.combined, dims = 1:35)
+data.combined <- FindClusters(data.combined, resolution = 0.9)
+#7 非线性降维分析
+data.combined <- RunUMAP(data.combined, dims = 1:35)
+DimPlot(data.combined, reduction = "umap",label = TRUE)
+data.combined <- RunTSNE(object = data.combined,dims = 1:35)
+TSNEPlot(object =data.combined,pt.size=2,label=TRUE)
+#1.图1细胞组成
+#1.1细胞命名
+new.cluster.ids <- c("Foveolar cell", "Gastric stem cell", "Parietal cell", 
+                     "Foveolar cell", "Foveolar cell", "Foveolar cell", 
+                     "Foveolar cell", "Parietal cell", "Foveolar cell",
+                     "Fibroblasts","Parietal cell","Foveolar cell",
+                     "Chief cell","T cell","Endocrine cell","Fibroblasts",
+                     "Goblet cell","Tuft cell","Macrophage","Endothelial cell","SPEM",
+                     "Mast cell","Mast cell","Smooth Muscle Cell","Smooth Muscle Cell","Macrophage")
+names(new.cluster.ids) <- levels(data.combined)
+data.combined <- RenameIdents(data.combined, new.cluster.ids)
+TSNEPlot(data.combined, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+
+
+
+#细胞轨迹
+library(monocle)
+#1.创建输入文件
+##提取表型信息--细胞信息(建议载入细胞的聚类或者细胞类型鉴定信息、实验条件等信息)
+data.combined<-JoinLayers(data.combined)#合并节点
+data.combined<-GetAssayData(data.combined)#合并counts
+data.combined[['cell_type']] <- data.combined@active.ident
+expr_matrix <- as(as.matrix(data.combined@assays$RNA$counts),'sparseMatrix')
+##提取表型信息到p_data(phenotype_data)
+p_data <- data.combined@meta.data
+p_data$celltype<-data.combined@active.ident
+#提取基因信息,如生物类型
+f_data <- data.frame(gene_short_name= row.names(data.combined),row.names= row.names(data.combined))
+#2.构建CDS对象
+pd <- new('AnnotatedDataFrame', data = p_data) 
+fd <- new('AnnotatedDataFrame', data = f_data)
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+#3.估计size factor和离散度
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+#4.过滤低质量的细胞
+cds <- detectGenes(cds, min_expr = 0.1)
+print(head(fData(cds)))
+expressed_genes <-row.names(subset(fData(cds),
+                                   num_cells_expressed >= 10))
+#5. 细胞分类,已经做过了
+#6. 轨迹定义基因选择及可视化和构建轨迹
+disp_table <-dispersionTable(cds)
+disp.genes <-subset(disp_table,mean_expression >= 0.1 & dispersion_empirical>= 1 * dispersion_fit)$gene_id
+cds <- setOrderingFilter(cds, disp.genes)
+plot_ordering_genes(cds)
+#gene数太多的话也可以选择top基因
+ordergene <- row.names(deg)[order(deg$qval)][1:400]
+cds <- reduceDimension(cds, max_components = 2,
+                       method = 'DDRTree')
+cds <- orderCells(cds)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE) 
+plot_cell_trajectory(cds,color_by="cell_type",size=1,show_backbone=TRUE)
+plot_cell_trajectory(cds,color_by="State",size=1,show_backbone=TRUE)
+plot_cell_trajectory(cds,color_by = "cell_type") + facet_wrap("cell_type", nrow = 1)+scale_color_manual(values = colour)
+
+library(ggsci)
+p1=plot_cell_trajectory(cds, color_by = "cell_type") +  scale_color_manual(values = colour)
+p2=plot_cell_trajectory(cds, color_by = "State")+ scale_color_nejm()
+colour=c("#20B2AA","#0000FF","#DC143C","#FFA500","#9370DB","#98FB98","#F08080","#FFFF00"
+         ,"#00CCFF","#FF1493","#CC99CC","#5F9EA0","#EEE8A0","#D1D1D1")
+
+
+
+p1 <- plot_cell_trajectory(cds, x = 1, y = 2, color_by = "celltype") +
+  theme(legend.position='none',panel.border = element_blank()) + 
+  scale_color_manual(values = colour) 
+p2 <- plot_complex_cell_trajectory(cds, x = 1, y = 2,
+                                   color_by = "celltype")+
+  scale_color_manual(values = colour) +
+  theme(legend.title= element_blank())
+p1|p2
+
+#指定基因可视化
+s.genes <- c("Sox2","Cdx1")
+plot_genes_jitter(cds[s.genes,],grouping = "State",color_by = "State")
+plot_genes_in_pseudotime(cds[s.genes,],color_by = "State")
+
+colnames(pData(cds))
+pData(cds)$Sox2= log2( exprs(cds)['Sox2',]+1)
+plot_cell_trajectory(cds, color_by = "Sox2")+ scale_color_gsea()
+pData(cds)$Cdx1= log2(exprs(cds)['Cdx1',]+1)
+
+
+#寻找拟时序相关基因
+Time_diff <- differentialGeneTest(cds[disp.genes,],cores = 1,
+                                  fullModelFormulaStr = "~sm.ns(Pseudotime)")
+Time_diff <- Time_diff[,c(5,2,3,4,1,6,7)]
+Time_genes <- Time_diff%>% pull(gene_short_name)%>% as.character()
+plot_pseudotime_heatmap(cds[Time_genes,],num_clusters=4, show_rownames=T, return_heatmap=T) 
+
+
+
+
+
+
+#EMT 
+library(msigdbr)
+m<-msigdbr(species="Homo sapiens",category="H")
+m_EMT<-m[m$gs_name=='HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION',]
+BiocManager::install("UCell")
+library(UCell)
+EMT<-list(m_EMT$gene_symbol)
+names(EMT)[1]<-'EMT'
+DefaultAssay(data.combined)<-'RNA'
+EMT_score<-AddModuleScore_UCell(data.combined,
+                                  features=EMT,
+                                  name="Hallmark_EMT_score")
+EMT_score$EMTHallmark_EMT_score
+library(viridis)
+FeaturePlot(EMT_score,features="EMTHallmark_EMT_score",split.by = "orig.ident",
+             order=T,cols  = colorRampPalette(c("#0E417A", "#ffffff","#7B283A"))(400),reduction = "tsne")
+library(ggpubr)
+df<-FetchData(EMT_score,vars=c("orig.ident","EMTHallmark_EMT_score"))
+my_comparisons<-list(c("Model","Control","BXD","ZLF"))
+colnames(df)
+colnames(df)[2]="Hallmark_EMT_score"
+ggplot(df,aes(x=orig.ident,y=Hallmark_EMT_score,fill=orig.ident))+
+  geom_violin(color='black',size=1)+#小提琴
+  theme_classic()+
+  theme(text=element_text(size=10,colour="black"))+
+  theme(plot.title=element_text(hjust=0.5,size=15),
+        axis.text.x=element_text(colour="black",size=12),
+        axis.text.y=element_text(colour="black",size=10),
+        axis.title.y=element_text(color='black',size=12),
+        axis.line=element_line(size=1))+
+  theme(legend.position="none")+
+  xlab(NULL)+
+  geom_boxplot(width=0.1,fill="white",outlier.shape=NA)+#箱线图
+  stat_compare_means(method="t.test",hide.ns=F,
+                     comparisons=c(),
+                     label="p.signif",
+                     bracket.size=0.8,
+                     size=6)#
+library(RColorBrewer)
+
+#巨噬细胞再分析
+Macro<-subset(Macro,idents="Macrophage")
+Macro <- NormalizeData(Macro, normalization.method = "LogNormalize", scale.factor = 10000)
+hist(colSums(Macro$RNA@data),breaks = 100, main = "Total expression after normalisation",xlab= "Sum of expression") 
+#3.变化基因鉴定,鉴定在细胞间表达高度变化的基因
+Macro <- FindVariableFeatures(Macro, selection.method = "vst", nfeatures = 2000)
+#数据缩放
+all.genes <- rownames(Macro)
+Macro <- ScaleData(Macro, features = all.genes)
+#
+Macro<- RunPCA(Macro, features = VariableFeatures(object = Macro))
+print(Macro[["pca"]], dims = 1:5, nfeatures = 5)#可视化对每个主成分影响比较大的基因集
+VizDimLoadings(Macro, dims = 1:2, reduction = "pca")
+DimPlot(Macro, reduction = "pca",split.by = 'ident')#两个
+DimHeatmap(Macro, dims = 1, cells = 500, balanced = TRUE)#DimHeatmap绘制基于单个主成分的热图，细胞和基因的排序都是基于他们的主成分分数
+DimHeatmap(Macro, dims = 1:15, cells = 500, balanced = TRUE)#展示多个
+Macro <- JackStraw(Macro, num.replicate = 100)
+Macro <- ScoreJackStraw(Macro, dims = 1:15)
+JackStrawPlot(Macro, dims = 1:15)
+ElbowPlot(object=Macro,ndims=50)
+Macro<- FindNeighbors(Macro, dims = 1:15)
+Macro <- FindClusters(Macro, resolution = 0.3)
+#7 非线性降维分析
+Macro <- RunUMAP(Macro, dims = 1:15 )
+DimPlot(Macro, reduction = "umap",label = TRUE)
+Macro <- RunTSNE(object = Macro,dims = 1:15)
+TSNEPlot(object =Macro,pt.size=2,label=TRUE)
+##标志基因气泡图
+list_genes=list(M1=c("Il23a","Cxcl9","Cd40","Ccr7","Irf1","Cd86","Il1b","Il6","Cd80"
+                    ,"Cd83","Cxcl16","Ciita"),
+                M2=c("Clec7a","Ccl4","Tgfb1","Ctsd","Ctsc","Ctsb","Ctsa",
+                     "Il10","Fn1","Mmp19"
+                     ,"Msr1","Tnfsf12"),
+                Angiogenesis=c("Tymp","Vcan","Cd44","Fyn","Vegfa","Tnfaip6",
+                               "Mmp9","Spp1","Cxcr4","Ptk2","Ccnd2","Ezh2","Vegfb"),
+                Phagocytosis=c("Cd163","C1qb","Mertk","Mrc1") ,
+                Proliferation=c("Mki67","Top2a","Cdk1","Ube2c"))
+p1=DotPlot(Macro,
+           features=list_genes,
+           cols = c("grey", "red"),
+           )+
+  RotatedAxis()+
+  theme(
+    # 面板
+    panel.border = element_rect(color="black"), #面板边框
+    panel.spacing = unit(1, "mm"), #面板间距
+    strip.text = element_text(margin=margin(b=3, unit="mm")),
+    strip.placement = 'outlet',
+    axis.line = element_blank(),
+  )+labs(x="", y="")
+                
+                
+##M1、M2评分
+m1_genes <- c("Il23a","Cxcl9","Cd40","Ccr7","Irf1","Cd86","Il1b","Il6","Cd80"
+              ,"Cd83","Cxcl16","Ciita")
+m2_genes <- c("Clec7a","Ccl4","Tgfb1","Ctsd","Ctsc","Ctsb","Ctsa",
+              "Il10","Fn1","Mmp19"
+              ,"Msr1","Tnfsf12")
+Angiogenesis_genes <-c("Tymp","Vcan","Cd44","Fyn","Vegfa","Tnfaip6",
+                "Mmp9","Spp1","Cxcr4","Ptk2","Ccnd2","Ezh2","Vegfb")
+Phagocytosis_genes <-c("Cd163","C1qb","Mertk","Mrc1")
+Proliferation_genes<-c("Mki67","Top2a","Cdk1","Ube2c")
+CheckPoit_genes<-c("Lair1","Sirpa","Havcr2","Nectin2","Pvr",
+                   "Cd274","Adora2a","Ido1","Btla")
+# 计算M1和M2型巨噬细胞的表达分数
+sce <- AddModuleScore(object = Macro, features = list
+                      (M1 = m1_genes, M2 = m2_genes,
+                        Angiogenesis=Angiogenesis_genes,
+                        Phagocytosis=Phagocytosis_genes,
+                        Proliferation=Proliferation_genes), 
+                      
+                      name = c('M1',"M2","Angio","Phago","Pro"))
+# 查看分数
+head(FetchData(sce, vars = c('Macrophage_Scores1', 'Macrophage_Scores2'
+                             ,"Macrophage_Scores3","Macrophage_Scores4")))
+library(ggplot2)
+#M1
+data <- FetchData(sce, vars = c('RNA_snn_res.0.5', 'M11'))
+ggplot(data, aes(x = RNA_snn_res.0.5, y = M11)) +
+  geom_boxplot() +
+  theme_bw()
+#M2
+data <- FetchData(sce, vars = c('RNA_snn_res.0.5', 'M22'))
+ggplot(data, aes(x = RNA_snn_res.0.5, y = M22)) +
+  geom_boxplot() +
+  theme_bw()
+#Angiogenesis
+data <- FetchData(sce, vars = c('RNA_snn_res.0.5', 'Angio3'))
+ggplot(data, aes(x = RNA_snn_res.0.5, y = Angio3)) +
+  geom_boxplot() +
+  theme_bw()
+#Phagocytosis
+data <- FetchData(sce, vars = c('RNA_snn_res.0.5', 'Phago4'))
+ggplot(data, aes(x = RNA_snn_res.0.5, y = Phago4)) +
+  geom_boxplot() +
+  theme_bw()
+#Proliferation_genes
+data <- FetchData(sce, vars = c('RNA_snn_res.0.5', 'Pro5'))
+ggplot(data, aes(x = RNA_snn_res.0.5, y = Pro5)) +
+  geom_boxplot() +
+  theme_bw()
+
+
+#比例
+new.cluster.ids <- c("Proliferations","Phagocytosis","M2","M1","M2","Angiogenesis")
+names(new.cluster.ids) <- levels(Macro)
+Macro <- RenameIdents(Macro, new.cluster.ids)
+DimPlot(Macro, reduction = "umap", label = TRUE)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(ggalluvial)
+#构建数据
+Ratio <- sce.integrated@meta.data %>%
+  group_by(orig.ident, cell_annotation) %>% # 分组
+  summarise(n=n()) %>%
+  mutate(relative_freq = n/sum(n))
+
+
+#堆叠柱状图
+mycolor = c('#efb306',
+            '#7db954',
+            '#852f88',
+            '#4e54ac',
+            '#0f8096',
+            'pink',
+            'green')
+
+ggplot(Ratio, aes(x =orig.ident, y= relative_freq, fill = cell_annotation,
+                  stratum=cell_annotation, alluvium=cell_annotation)) +
+  geom_col(width = 0.5, color='black')+
+  geom_flow(width=0.5,alpha=0.4, knot.pos=0.5)+ # 参数knot.pos设置为0.5使连接为曲线面积，就像常见的桑基图
+  theme_classic() +
+  labs(x='Sample',y = 'Ratio')+
+  coord_flip()+
+  scale_fill_manual(values = mycolor)
+
+###细胞轨迹分析
+library(monocle)
+
+
+##轨迹分析
+BiocManager::install("monocle")
+library(monocle)
+library(dplyr)
+library(patchwork)
+expr_matrix <- as(as.matrix(Macro@assays$RNA$counts), 'sparseMatrix')
+p_data <- Macro@meta.data
+p_data$celltype <- Macro@active.ident
+f_data <- data.frame(gene_short_name = row.names(Macro),row.names = row.names(Macro))
+pd <- new('AnnotatedDataFrame', data = p_data) 
+fd <- new('AnnotatedDataFrame', data = f_data)
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+cds <- detectGenes(cds,min_expr = 0.1)
+expressed_genes <-row.names(subset(fData(cds),
+                                   num_cells_expressed >= 10)) 
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~cell_type",cores=1) 
+deg <- subset(diff,qval < 0.01)
+
+deg <- deg[order(deg$qval,decreasing=F),]
+ordergene <- rownames(deg) 
+cds <- setOrderingFilter(cds, ordergene)  
+plot_ordering_genes(cds)
+cds <- reduceDimension(cds, max_components = 2,
+                       method = 'DDRTree')
+cds <- orderCells(cds)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE) 
+plot_cell_trajectory(cds,color_by="RNA_snn_res.0.5", size=1,show_backbone=TRUE)
+s.genes <- c("Il10","Tgfb1","Ctsd","Ctsc","Ctsb","Ctsa")
+plot_genes_in_pseudotime(cds[s.genes,], color_by = "State")
+cluster2 <- FindMarkers(Macro, min.pct=0,logfc.threshold = 0,
+                        group.by = "RNA_snn_res.0.5",ident.1 =
+                          "2")#两个样本差异基因
+library("org.Rn.eg.db")
+rt=read.table("Cluster2.txt",sep="\t",check.names=F)#读取你的基因表，就是师姐你给我的那个表
+colnames(rt)<-rt[1,]
+genes=as.vector(rt[,1])
+entrezIDs <- mget(genes, org.Rn.egSYMBOL2EG, ifnotfound=NA) 
+entrezIDs <- as.character(entrezIDs)
+out=cbind(rt,entrezID=entrezIDs)
+library("clusterProfiler")
+library("org.Rn.eg.db")
+library("enrichplot")
+library("ggplot2")
+rt<-out      #??ȡid.txt?ļ?
+rt=rt[is.na(rt[,"entrezID"])==F,]                             #ȥ??????idΪNA?Ļ???
+gene=rt$entrezID
+kk <- enrichKEGG(gene = gene, organism = "rno",pvalueCutoff=1,qvalueCutoff = 1)
+result<-as.data.frame(kk)
+write.csv(result,file="result2.csv")
+cluster1 <- FindMarkers(Macro, min.pct=0,logfc.threshold = 0,
+                        group.by = "RNA_snn_res.0.5",ident.1 =
+                          "1")#两个样本差异基因
+write.csv(cluster1,file = "cluster1.csv")
+library("org.Rn.eg.db")
+rt1=read.table("Cluster1.txt",sep="\t",check.names=F)#读取你的基因表，就是师姐你给我的那个表
+colnames(rt1)<-rt1[1,]
+genes=as.vector(rt1[,1])
+entrezIDs <- mget(genes, org.Rn.egSYMBOL2EG, ifnotfound=NA) 
+entrezIDs <- as.character(entrezIDs)
+out=cbind(rt,entrezID=entrezIDs)
+rt<-out      #??ȡid.txt?ļ?
+rt=rt[is.na(rt[,"entrezID"])==F,]                             #ȥ??????idΪNA?Ļ???
+gene=rt$entrezID
+kk <- enrichKEGG(gene = gene, organism = "rno",pvalueCutoff=1,qvalueCutoff = 1)
+result<-as.data.frame(kk)
+write.csv(result,file = "result1.csv")
+
+
+####Tcell
+T<-subset(data.combined,idents="T cell")
+T <- NormalizeData(T, normalization.method = "LogNormalize", scale.factor = 10000)
+hist(colSums(T$RNA@data),breaks = 100, main = "Total expression after normalisation",xlab= "Sum of expression") 
+#3.变化基因鉴定,鉴定在细胞间表达高度变化的基因
+T <- FindVariableFeatures(T, selection.method = "vst", nfeatures = 2000)
+#数据缩放
+all.genes <- rownames(T)
+T <- ScaleData(T, features = all.genes)
+#
+T<- RunPCA(T, features = VariableFeatures(object = T))
+print(T[["pca"]], dims = 1:5, nfeatures = 5)#可视化对每个主成分影响比较大的基因集
+VizDimLoadings(T, dims = 1:2, reduction = "pca")
+DimPlot(T, reduction = "pca",split.by = 'ident')#两个
+DimHeatmap(T, dims = 1, cells = 500, balanced = TRUE)#DimHeatmap绘制基于单个主成分的热图，细胞和基因的排序都是基于他们的主成分分数
+DimHeatmap(T, dims = 1:15, cells = 500, balanced = TRUE)#展示多个
+T <- JackStraw(T, num.replicate = 100)
+T <- ScoreJackStraw(T, dims = 1:15)
+JackStrawPlot(T, dims = 1:15)
+ElbowPlot(object=T,ndims=50)
+T<- FindNeighbors(T, dims = 1:15)
+T <- FindClusters(T, resolution = 0.3)
+#7 非线性降维分析
+T <- RunUMAP(T, dims = 1:15 )
+DimPlot(T, reduction = "umap",label = TRUE)
+T <- RunTSNE(object = T,dims = 1:30)
+TSNEPlot(object =T,pt.size=2,label=TRUE)
+
+
+###细胞衰老
+#1.GSEA
+getwd()
+setwd("/mnt/data/home/tyu-9bw1lc6n/data/Celler Sceence")
+library(ReactomePA)    #加载所需R包
+library(tidyverse)
+library(data.table)
+library(org.Rn.eg.db)
+library(clusterProfiler)
+library(biomaRt)
+library(enrichplot)
+#模型组
+genelist_input=read.table("model.txt",sep="\t",check.names=F,header=T)
+genename <- as.character(genelist_input[,1])   #提取第一列基因名
+gene_map <- AnnotationDbi::select(org.Rn.eg.db, keys=genename, keytype="SYMBOL", columns=c("ENTREZID"))  #将SYMBOL格式的ID换成ENTREZ格式的ID
+
+non_duplicates_idx <- which(duplicated(gene_map$SYMBOL) == FALSE)  
+gene_map <- gene_map[non_duplicates_idx, ]   #去除重复值
+colnames(gene_map)[1]<-"Gene"  #输出mapping结果
+
+#将ENTREZID与logFC对应起来，并根据logFC的值降序排列，最终生成结果如图所示。
+temp<-inner_join(gene_map,genelist_input,by = "Gene")
+temp<-temp[,-1]
+temp<-na.omit(temp)
+temp$avg_log2FC<-sort(temp$avg_log2FC,decreasing = T)
+
+#最后我们将文件内容整理成GSEA分析所需的格式（如图所示），我们就可以开始GSEA分析了！
+geneList = temp[,2]
+names(geneList) = as.character(temp[,1])
+
+#进行GSEA分析，并保存结果
+KEGG_gseresult <- gseKEGG(geneList, pvalueCutoff=1,organism = "rno")
+modelresult<-as.data.frame(KEGG_gseresult)
+gseaplot2(KEGG_gseresult,1)
+
+
+#半夏组
+genelist_input=read.table("bxd.txt",sep="\t",check.names=F,header=T)
+genename <- as.character(genelist_input[,1])   #提取第一列基因名
+gene_map <- AnnotationDbi::select(org.Rn.eg.db, keys=genename, keytype="SYMBOL", columns=c("ENTREZID"))  #将SYMBOL格式的ID换成ENTREZ格式的ID
+
+non_duplicates_idx <- which(duplicated(gene_map$SYMBOL) == FALSE)  
+gene_map <- gene_map[non_duplicates_idx, ]   #去除重复值
+colnames(gene_map)[1]<-"Gene"  #输出mapping结果
+
+#将ENTREZID与logFC对应起来，并根据logFC的值降序排列，最终生成结果如图所示。
+tempbxd<-inner_join(gene_map,genelist_input,by = "Gene")
+tempbxd<-tempbxd[,-1]
+tempbxd<-na.omit(tempbxd)
+tempbxd$avg_log2FC<-sort(tempbxd$avg_log2FC,decreasing = T)
+
+#最后我们将文件内容整理成GSEA分析所需的格式（如图所示），我们就可以开始GSEA分析了！
+geneList = tempbxd[,2]
+names(geneList) = as.character(tempbxd[,1])
+
+#进行GSEA分析，并保存结果
+KEGG_gseresult <- gseKEGG(geneList, pvalueCutoff=1,organism = "rno")
+bxdresult<-as.data.frame(KEGG_gseresult)
+gseaplot2(KEGG_gseresult,74)
+
+
+##XKD
+genelist_input=read.table("xkd.txt",sep="\t",check.names=F,header=T)
+genename <- as.character(genelist_input[,1])   #提取第一列基因名
+gene_map <- AnnotationDbi::select(org.Rn.eg.db, keys=genename, keytype="SYMBOL", columns=c("ENTREZID"))  #将SYMBOL格式的ID换成ENTREZ格式的ID
+
+non_duplicates_idx <- which(duplicated(gene_map$SYMBOL) == FALSE)  
+gene_map <- gene_map[non_duplicates_idx, ]   #去除重复值
+colnames(gene_map)[1]<-"Gene"  #输出mapping结果
+
+#将ENTREZID与logFC对应起来，并根据logFC的值降序排列，最终生成结果如图所示。
+temp<-inner_join(gene_map,genelist_input,by = "Gene")
+temp<-tempbxd[,-1]
+temp<-na.omit(tempbxd)
+temp$avg_log2FC<-sort(temp$avg_log2FC,decreasing = T)
+
+#最后我们将文件内容整理成GSEA分析所需的格式（如图所示），我们就可以开始GSEA分析了！
+geneList = temp[,2]
+names(geneList) = as.character(temp[,1])
+
+#进行GSEA分析，并保存结果
+KEGG_gseresult <- gseKEGG(geneList, pvalueCutoff=1,organism = "rno")
+bxdresult<-as.data.frame(KEGG_gseresult)
+gseaplot2(KEGG_gseresult,74)
+
+#2.气泡图
+DotPlot(data.combined,features = c("Fbxo4", "Hmga1b", "Abl1", "Pawr", "Prelp", "Arg2",
+                                   "Bmal1", "B2m", "Bcl6", "Bmpr1a", "Brca2", "Calr", 
+                                   "Cav1", "Cdk6", "Cdkn1a", "Cdkn2a", "Cdkn2b", "Comp", 
+                                   "Gch1", "Htt", "Hmga1", "Hmga2", "Hras", "Id2", "Ilk", 
+                                   "Kras", "Lmna", "Mapkapk5", "Mif", "Mnt", "Npm1",
+                                   "Nup62", "Prkcd", "Pla2r1", "Pml", "Prkdc", "Pten",
+                                   "Rbl1", "Spi1", "Plk2", "Srf", "Suv39h1", "Tbx2", 
+                                   "Tbx3", "Cgas", "Terf2", "Tert", "Trp53", "Trp63",
+                                   "Twist1", "Wnt1", "Wrn", "Smc5", "Ybx1", "Zfp217", 
+                                   "Zmpste24", "Akt3", "Vash1", "Nek4", "Kat6a", "Zfp277", 
+                                   "Map2k1", "Map3k3", "Mapk14", "Zmiz1", "Morc3", "Mirlet7d", "Mirlet7g", "Mirlet7f-1", "Mirlet7f-2", "Ndufs6", "Sirt6", "Fzr1", "Mtor", "Icmt", "Nampt", "Ypel3", "Eef1e1", "Rsl1d1", "Abi3", "Fbxo5", "Smc6", "Nsmce2", "Pnpt1", "Pot1b", "Opa1", "Bcl2l12", "Nuak1", "Ecrg4", "Dnaja3", "Wnt16", "Sirt1", "Prmt6"), group.by = "orig.ident")
+DotPlot(data.combined,features = c("Fbxo4",  "Abl1", "Pawr", "Prelp", "Arg2", "Bmal1", "B2m", "Calr", "Cdkn2b","Hmga1", "Id2", "Ilk",  "Lmna", "Mapkapk5", "Mif", "Mnt", "Npm1", "Nup62", "Prkcd",  "Pten","Srf", "Suv39h1", "Ybx1","Kat6a", "Zfp277", "Map2k1", "Map3k3", "Mapk14", "Zmiz1", "Nampt", "Ypel3", "Eef1e1", "Rsl1d1"), group.by = "orig.ident",cols = c("grey", "red"))
+
+#gsea评分
+CellularSenescence_genes<-c("Fbxo4", "Abl1", "Pawr", "Prelp", "Arg2", "Bmal1", 
+                            "B2m", "Bcl6", "Bmpr1a", "Brca2", "Calr", "Cav1",
+                            "Cdk6", "Cdkn1a", "Cdkn2a", "Cdkn2b", "Comp", "Gch1", 
+                            "Htt", "Hmga1", "Hmga2", "Hras", "Id2", "Ilk", 
+                            "Lmna", "Mapkapk5", "Mif", "Mnt", "Npm1", "Nup62",
+                            "Prkcd", "Pla2r1", "Pml", "Prkdc", "Pten", "Rbl1", 
+                            "Spi1", "Plk2", "Srf", "Suv39h1", "Tbx2", "Tbx3", "Cgas",
+                            "Terf2", "Tert",  "Twist1", "Wnt1", "Wrn", "Smc5", "Ybx1",
+                            "Zfp217", "Zmpste24", "Akt3", "Vash1", "Nek4", "Kat6a", "Zfp277", 
+                            "Map2k1", "Map3k3", "Mapk14", "Zmiz1", "Morc3", 
+                             "Sirt6", "Fzr1", "Mtor", "Icmt", "Nampt", "Ypel3", "Eef1e1", "Rsl1d1", "Abi3", "Fbxo5", "Smc6", "Nsmce2", "Pnpt1", "Pot1b", "Opa1", "Bcl2l12", "Nuak1", "Ecrg4", "Dnaja3", "Wnt16", "Sirt1", "Prmt6")
+#
+data.combined1 <- JoinLayers(data.combined1)
+
+
+# 计算细胞死亡的表达分数
+sce <- AddModuleScore(object =data.combined1, features =
+                        list(CellularSenescence_genes),name = c("CellularSenescence") )
+library(ggplot2)
+#M1
+data <- FetchData(sce, vars = c('RNA_snn_res.0.9', 'CellularSenescence1'))
+ggplot(data, aes(x = RNA_snn_res.0.9, y = CellularSenescence1)) +
+  geom_boxplot() +
+  theme_bw()
+#M2
