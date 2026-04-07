@@ -1,0 +1,2 @@
+# Xinkai-Kujiang-Formula-in-Treating-Gastric-Intestinal-Metaplasia-in-Rats
+GIM rat models were established by intragastic administration of 2% sodium salicylate and 20 mmol/L deoxycholic acid sodium, followed by 4-week treatment with Baixia Xiexin Decoction (BXD) and Xinkai Kujiang Decoction (XKD). Multi-omics analyses were performed to explore the therapeutic mechanisms of the Xinkai Kujiang formula against GIM.
